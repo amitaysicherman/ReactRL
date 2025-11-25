@@ -33,21 +33,28 @@ def get_compute_metrics_fn(tokenizer):
         logits, labels = eval_pred
         predictions = np.argmax(logits, axis=-1)
 
+        # --- SHIFT LOGIC (CRITICAL FIX) ---
+        # The model predicts the NEXT token.
+        # So, preds at [i] must be compared with labels at [i+1].
+
+        # Remove the last prediction (nothing to compare it to)
+        predictions = predictions[:, :-1]
+        # Remove the first label (nothing predicted it)
+        labels = labels[:, 1:]
+        # ----------------------------------
+
         # --- PRINTING LOGIC ---
-        # Only print the first 10 to keep logs clean
         n_print = min(10, len(labels))
-        print(f"\n{'=' * 20} PREDICTIONS (Loss-contributing tokens only) {'=' * 20}")
+        print(f"\n{'=' * 20} PREDICTIONS (Shifted & Masked) {'=' * 20}")
 
         for i in range(n_print):
-            # Create a boolean mask for this specific row where label is NOT -100
-            # This identifies exactly which tokens contributed to the loss
+            # Mask: Only look at positions where we are calculating loss (not -100)
             row_mask = labels[i] != -100
 
-            # Apply mask to get only the 'valid' IDs for both Gold and Pred
+            # Apply mask to the SHIFTED arrays
             valid_label_ids = labels[i][row_mask]
             valid_pred_ids = predictions[i][row_mask]
 
-            # Decode only these parts
             gold_str = tokenizer.decode(valid_label_ids, skip_special_tokens=True)
             pred_str = tokenizer.decode(valid_pred_ids, skip_special_tokens=True)
 
@@ -56,16 +63,14 @@ def get_compute_metrics_fn(tokenizer):
             print(f"  Pred: {pred_str}")
 
         print(f"{'=' * 60}\n")
-        # ----------------------
 
         # --- METRICS LOGIC ---
-        # Flatten masks for accuracy calculation
         total_mask = labels != -100
         filtered_preds = predictions[total_mask]
         filtered_labels = labels[total_mask]
+
         token_accuracy = (filtered_preds == filtered_labels).mean()
 
-        # Row-level accuracy (Perfect Match)
         correct_predictions = (predictions == labels)
         row_is_correct = (correct_predictions | ~total_mask).all(axis=1)
         perfect_match_acc = row_is_correct.mean()
@@ -76,7 +81,6 @@ def get_compute_metrics_fn(tokenizer):
         }
 
     return compute_metrics
-
 
 if __name__ == "__main__":
     train_dataset, val_dataset, train_subset_dataset = get_datasets()
