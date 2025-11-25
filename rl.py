@@ -54,7 +54,7 @@ if __name__ == "__main__":
 
     rl_dataset = train_dataset.map(get_prompt, remove_columns=train_dataset.column_names)
     tokenizer=get_tokenizer(train_dataset)
-    rl_dataset = rl_dataset.map(tokenize_rl_prompt, batched=True, remove_columns=["prompt", "text"])
+    rl_dataset = rl_dataset.map(lambda x:tokenize_rl_prompt(tokenizer=tokenizer,example=x), batched=True, remove_columns=["prompt", "text"])
     rl_dataset.set_format("torch", columns=["input_ids", "attention_mask"])
 
 
@@ -104,10 +104,10 @@ for epoch in range(2):
         ]
 
         generated_smiles_tokens = []
-        for text in response_texts:
-            match = re.search(r'>>\s+(.*)', text)
-            smiles_tokens = match.group(1).strip() if match else ""
-            smiles_tokens = smiles_tokens.split(' ')[0].split('<')[0].split('\n')[0]
+        for smiles_tokens in response_texts:
+            # match = re.search(r'>>\s+(.*)', text)
+            # smiles_tokens = match.group(1).strip() if match else ""
+            # smiles_tokens = smiles_tokens.split(' ')[0].split('<')[0].split('\n')[0]
             generated_smiles_tokens.append(smiles_tokens)
 
         rewards = smiles_validity_reward(generated_smiles_tokens)
