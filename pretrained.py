@@ -29,49 +29,45 @@ class DataCollatorForReaction(DataCollatorForLanguageModeling):
 
 
 def get_compute_metrics_fn(tokenizer):
-    """
-    Returns the compute_metrics function with access to the tokenizer
-    for decoding and printing.
-    """
-
     def compute_metrics(eval_pred):
         logits, labels = eval_pred
         predictions = np.argmax(logits, axis=-1)
 
         # --- PRINTING LOGIC ---
-        # Print only the first 10 examples to avoid log spam
+        # Only print the first 10 to keep logs clean
         n_print = min(10, len(labels))
-        print(f"\n{'=' * 20} SAMPLE PREDICTIONS (First {n_print}) {'=' * 20}")
+        print(f"\n{'=' * 20} PREDICTIONS (Loss-contributing tokens only) {'=' * 20}")
 
         for i in range(n_print):
-            # 1. Decode the Prediction
-            # We keep special tokens briefly to see if '>>' or '</s>' are generated correctly,
-            # but for pure SMILES checking you might prefer skip_special_tokens=True.
-            pred_ids = predictions[i]
-            pred_str = tokenizer.decode(pred_ids, skip_special_tokens=True)
+            # Create a boolean mask for this specific row where label is NOT -100
+            # This identifies exactly which tokens contributed to the loss
+            row_mask = labels[i] != -100
 
-            # 2. Decode the Label (Gold)
-            # Labels have -100 for masked parts (the reactants). We must filter these out
-            # to see the actual target (the product).
-            label_ids = labels[i]
-            label_ids_clean = [token for token in label_ids if token != -100]
-            label_str = tokenizer.decode(label_ids_clean, skip_special_tokens=True)
+            # Apply mask to get only the 'valid' IDs for both Gold and Pred
+            valid_label_ids = labels[i][row_mask]
+            valid_pred_ids = predictions[i][row_mask]
 
-            print(f"Example {i}:")
-            print(f"  Gold: {label_str}")
+            # Decode only these parts
+            gold_str = tokenizer.decode(valid_label_ids, skip_special_tokens=True)
+            pred_str = tokenizer.decode(valid_pred_ids, skip_special_tokens=True)
+
+            print(f"Ex {i}:")
+            print(f"  Gold: {gold_str}")
             print(f"  Pred: {pred_str}")
+
         print(f"{'=' * 60}\n")
         # ----------------------
 
         # --- METRICS LOGIC ---
-        mask = labels != -100
-        filtered_preds = predictions[mask]
-        filtered_labels = labels[mask]
+        # Flatten masks for accuracy calculation
+        total_mask = labels != -100
+        filtered_preds = predictions[total_mask]
+        filtered_labels = labels[total_mask]
         token_accuracy = (filtered_preds == filtered_labels).mean()
 
-        # Check exact row match (ignoring masked parts)
+        # Row-level accuracy (Perfect Match)
         correct_predictions = (predictions == labels)
-        row_is_correct = (correct_predictions | ~mask).all(axis=1)
+        row_is_correct = (correct_predictions | ~total_mask).all(axis=1)
         perfect_match_acc = row_is_correct.mean()
 
         return {
@@ -80,6 +76,7 @@ def get_compute_metrics_fn(tokenizer):
         }
 
     return compute_metrics
+
 
 if __name__ == "__main__":
     train_dataset, val_dataset, train_subset_dataset = get_datasets()
