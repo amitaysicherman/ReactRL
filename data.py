@@ -79,8 +79,11 @@ def get_tokenizer(dataset):
 
 
 def tokenize_function(tokenizer, examples):
+    text=examples["text"]
+    # add eos token at the end if not present
+    text = [t if t.endswith(tokenizer.eos_token) else t + " " + tokenizer.eos_token for t in text]
     return tokenizer(
-        examples["text"],
+        text,
         truncation=True,
         max_length=MAX_SEQ_LENGTH,
         padding="max_length"

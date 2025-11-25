@@ -93,22 +93,33 @@ for epoch in range(2):
         prompts = [p.split(' >> ')[0] + ' >> ' for p in prompt_texts]
         prompt_tensors = tokenizer(prompts, return_tensors="pt", padding=True, truncation=True).input_ids
         prompt_tensors = [x for x in prompt_tensors]
+        # Ensure we provide an eos token id to generation so model can stop early
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_id is None:
+            # fall back to sep or pad if EOS is not set
+            eos_id = getattr(tokenizer, "sep_token_id", None) or tokenizer.pad_token_id
+
         response_tensors = ppo_trainer.generate(
             prompt_tensors,
             max_new_tokens=100,
             pad_token_id=tokenizer.pad_token_id,  # Use PAD token
+            eos_token_id=eos_id,
+            do_sample=False,
+            early_stopping=True,
         )
-        response_texts = [
-            tokenizer.decode(r.squeeze()[-len(q):], skip_special_tokens=True).strip()
-            for r, q in zip(response_tensors, prompt_tensors)
-        ]
 
+        # Decode only up to the EOS token for each generated sequence to avoid identical padded tails
         generated_smiles_tokens = []
-        for smiles_tokens in response_texts:
-            # match = re.search(r'>>\s+(.*)', text)
-            # smiles_tokens = match.group(1).strip() if match else ""
-            # smiles_tokens = smiles_tokens.split(' ')[0].split('<')[0].split('\n')[0]
-            generated_smiles_tokens.append(smiles_tokens)
+        for r, q in zip(response_tensors, prompt_tensors):
+            full = r.squeeze()
+            gen = full[len(q):]
+            # Convert to python list of ids
+            gen_ids = gen.tolist() if isinstance(gen, torch.Tensor) else list(gen)
+            if eos_id in gen_ids:
+                idx = gen_ids.index(eos_id)
+                gen_ids = gen_ids[:idx]
+            text = tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+            generated_smiles_tokens.append(text)
 
         rewards = smiles_validity_reward(generated_smiles_tokens)
         stats = ppo_trainer.step(prompt_tensors, response_tensors, rewards)
@@ -117,4 +128,3 @@ for epoch in range(2):
     ppo_trainer.save_pretrained(RL_OUTPUT_DIR)
     tokenizer.save_pretrained(RL_OUTPUT_DIR)
     print(f"RL fine-tuned model and tokenizer saved to {RL_OUTPUT_DIR}")
-
