@@ -43,13 +43,21 @@ def get_datasets():
 
 
 def format_reaction(example):
-    example["text"] = regex_smiles_pretokenize(example['reaction_smiles'])
-    return example
+    full_text = regex_smiles_pretokenize(example['reaction_smiles'])
+    parts = full_text.split(" >> ")
+
+    assert len(parts) == 2, "Each reaction must have reactants and a product separated by ' >> '"
+    inputs = parts[0]  # Reactants
+    targets = parts[1]  # Product
+
+    return {"input_text": inputs, "target_text": targets}
 
 
 def get_training_corpus(dataset):
     for i in range(0, len(dataset), 1000):
-        yield dataset[i: i + 1000]["text"]
+        # Flatten inputs and targets for tokenizer training
+        batch = dataset[i: i + 1000]
+        yield batch["input_text"] + batch["target_text"]
 
 
 def get_tokenizer(dataset):
@@ -73,31 +81,53 @@ def get_tokenizer(dataset):
         mask_token="[MASK]",
         model_max_length=MAX_SEQ_LENGTH,
         eos_token="[EOS]",
-        padding_side="left",
+        padding_side="right",
     )
     return tokenizer
 
 
 def tokenize_function(tokenizer, examples):
-    text=examples["text"]
-    # add eos token at the end if not present
-    text = [t if t.endswith(tokenizer.eos_token) else t + " " + tokenizer.eos_token for t in text]
-    return tokenizer(
-        text,
-        truncation=True,
+    inputs = examples["input_text"]
+    targets = examples["target_text"]
+
+    # Tokenize inputs (Encoder)
+    model_inputs = tokenizer(
+        inputs,
         max_length=MAX_SEQ_LENGTH,
+        truncation=True,
         padding="max_length"
     )
 
+    # Tokenize targets (Decoder)
+    with tokenizer.as_target_tokenizer():
+        labels = tokenizer(
+            targets,
+            max_length=MAX_SEQ_LENGTH,
+            truncation=True,
+            padding="max_length"
+        )
+
+    # T5 ignores pad tokens in loss if they are -100
+    labels["input_ids"] = [
+        [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+    ]
+
+    model_inputs["labels"] = labels["input_ids"]
+    return model_inputs
+
 
 def tokenize_dataset(tokenizer, dataset):
-    return dataset.map(lambda x: tokenize_function(tokenizer, x), batched=True, remove_columns=["text"])
+    return dataset.map(
+        lambda x: tokenize_function(tokenizer, x),
+        batched=True,
+        remove_columns=["input_text", "target_text"]
+    )
 
 
-def tokenize_rl_prompt(tokenizer,example):
-    # The prompt is the space-separated string of reactant tokens + " >> "
+def tokenize_rl_prompt(tokenizer, example):
+    # For RL, the "prompt" is just the reactants (Encoder input)
     return tokenizer(
-        example["prompt"],
+        example["input_text"],
         truncation=True,
         max_length=MAX_SEQ_LENGTH,
         padding="max_length"

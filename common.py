@@ -1,6 +1,6 @@
 # --- Configuration ---
 import re
-MODEL_NAME = "openai-community/gpt2"  # Using gpt2 base model for compatibility with CausalLM and TRL
+MODEL_NAME = "google-t5/t5-small"  # Using gpt2 base model for compatibility with CausalLM and TRL
 SFT_OUTPUT_DIR = "./sft_reaction_model"
 RL_OUTPUT_DIR = "./rl_reaction_model"
 TOKENIZER_OUTPUT_DIR = "./smiles_tokenizer"

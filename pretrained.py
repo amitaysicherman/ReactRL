@@ -1,126 +1,95 @@
 import torch
 from transformers import (
-    AutoModelForCausalLM,
-    TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling,
+    AutoModelForSeq2SeqLM,  # Changed from CausalLM
+    Seq2SeqTrainingArguments,  # Changed from TrainingArguments
+    Seq2SeqTrainer,  # Changed from Trainer
+    DataCollatorForSeq2Seq,  # Standard Seq2Seq Collator
 )
 import numpy as np
 from common import MODEL_NAME, SFT_OUTPUT_DIR
 from data import get_tokenizer, get_datasets, tokenize_dataset
 
 
-class DataCollatorForReaction(DataCollatorForLanguageModeling):
-    """
-    Custom collator that masks the loss for the "prompt" part (reactants + separator).
-    It sets labels to -100 for all tokens up to and including '>>'.
-    """
-
-    def torch_call(self, examples):
-        # Let the parent class handle basic batching and tensor conversion
-        batch = super().torch_call(examples)
-        sep_token_id = self.tokenizer.convert_tokens_to_ids(">>")
-        for i in range(len(batch["labels"])):
-            sep_indices = (batch["labels"][i] == sep_token_id).nonzero(as_tuple=True)[0]
-            if len(sep_indices) > 0:
-                sep_idx = sep_indices[0]
-                batch["labels"][i, :sep_idx + 1] = -100
-        return batch
-
-
 def get_compute_metrics_fn(tokenizer):
     def compute_metrics(eval_pred):
-        logits, labels = eval_pred
-        predictions = np.argmax(logits, axis=-1)
+        predictions, labels = eval_pred
 
-        # --- SHIFT LOGIC (CRITICAL FIX) ---
-        # The model predicts the NEXT token.
-        # So, preds at [i] must be compared with labels at [i+1].
+        # In case the model returns more than just logits (like tuple), handle it
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
 
-        # Remove the last prediction (nothing to compare it to)
-        predictions = predictions[:, :-1]
-        # Remove the first label (nothing predicted it)
-        labels = labels[:, 1:]
-        # ----------------------------------
+        # Decode generated predictions
+        decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
 
-        # --- PRINTING LOGIC ---
-        n_print = min(10, len(labels))
-        print(f"\n{'=' * 20} PREDICTIONS (Shifted & Masked) {'=' * 20}")
+        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-        for i in range(n_print):
-            # Mask: Only look at positions where we are calculating loss (not -100)
-            row_mask = labels[i] != -100
+        # Print a few examples
+        print(f"\n{'=' * 20} EXAMPLES {'=' * 20}")
+        for i in range(min(3, len(decoded_preds))):
+            print(f"Pred: {decoded_preds[i]}")
+            print(f"Gold: {decoded_labels[i]}")
+            print("-" * 20)
 
-            # Apply mask to the SHIFTED arrays
-            valid_label_ids = labels[i][row_mask]
-            valid_pred_ids = predictions[i][row_mask]
-
-            gold_str = tokenizer.decode(valid_label_ids, skip_special_tokens=True)
-            pred_str = tokenizer.decode(valid_pred_ids, skip_special_tokens=True)
-
-            print(f"Ex {i}:")
-            print(f"  Gold: {gold_str}")
-            print(f"  Pred: {pred_str}")
-
-        print(f"{'=' * 60}\n")
-
-        # --- METRICS LOGIC ---
-        total_mask = labels != -100
-        filtered_preds = predictions[total_mask]
-        filtered_labels = labels[total_mask]
-
-        token_accuracy = (filtered_preds == filtered_labels).mean()
-
-        correct_predictions = (predictions == labels)
-        row_is_correct = (correct_predictions | ~total_mask).all(axis=1)
-        perfect_match_acc = row_is_correct.mean()
+        # Simple Exact Match Accuracy
+        matches = [pred.strip() == label.strip() for pred, label in zip(decoded_preds, decoded_labels)]
+        perfect_match_acc = sum(matches) / len(matches)
 
         return {
-            "token_accuracy": token_accuracy,
             "perfect_match_accuracy": perfect_match_acc
         }
 
     return compute_metrics
 
+
 if __name__ == "__main__":
     train_dataset, val_dataset, train_subset_dataset = get_datasets()
     tokenizer = get_tokenizer(train_dataset)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+
+    # Load T5 (or similar Encoder-Decoder)
+    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
     model.resize_token_embeddings(len(tokenizer))
+
     num_params = sum(p.numel() for p in model.parameters())
     print(f"Model loaded with {num_params} parameters.")
 
-    sft_training_args = TrainingArguments(
+    sft_training_args = Seq2SeqTrainingArguments(
         output_dir=SFT_OUTPUT_DIR,
         num_train_epochs=50,
         per_device_train_batch_size=64,
-        # --- ADDED FOR METRICS ---
-        evaluation_strategy="steps",  # Calculate metrics every X steps
-        eval_steps=250,  # Align with logging steps
+        per_device_eval_batch_size=64,
+        evaluation_strategy="steps",
+        eval_steps=250,
         logging_steps=250,
-        # -------------------------
         warmup_steps=100,
         save_strategy="epoch",
         fp16=torch.cuda.is_available(),
         report_to="none",
         learning_rate=5e-5,
         lr_scheduler_type='constant',
+        predict_with_generate=True,  # Critical for Seq2Seq metrics
+        generation_max_length=100,
+    )
 
-    )
-    reaction_collator = DataCollatorForReaction(
+    # Use standard Seq2Seq collator
+    data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
-        mlm=False  # We are doing Causal LM, not Masked LM
+        model=model,
+        label_pad_token_id=-100
     )
+
     tokenized_train_dataset = tokenize_dataset(tokenizer, train_dataset)
     tokenized_eval_dataset = tokenize_dataset(tokenizer, val_dataset)
-    tokenized_train_sunset_dataset = tokenize_dataset(tokenizer, train_subset_dataset)
+    tokenized_train_subset_dataset = tokenize_dataset(tokenizer, train_subset_dataset)
+
     compute_metrics_fn = get_compute_metrics_fn(tokenizer)
-    sft_trainer = Trainer(
+
+    sft_trainer = Seq2SeqTrainer(
         model=model,
         args=sft_training_args,
         train_dataset=tokenized_train_dataset,
-        eval_dataset={"validation": tokenized_eval_dataset, "train_subset": tokenized_train_sunset_dataset},
-        data_collator=reaction_collator,
+        eval_dataset={"validation": tokenized_eval_dataset, "train_subset": tokenized_train_subset_dataset},
+        data_collator=data_collator,
         compute_metrics=compute_metrics_fn,
     )
 
